@@ -10,8 +10,9 @@ import os
 # HYPERPARAMETER
 # Evolutionäre Parameter
 POPULATION_SIZE = 50
-GENERATIONS = 200
-GAMES_PER_MODEL_PER_GEN = 20
+GENERATIONS = 100
+GAMES_PER_MODEL_PER_GEN_AGAINST_PARENTS = 25
+GAMES_PER_MODEL_PER_GEN = 10
 INPUT_SIZE = 644 # 36 Karten * 17 One-Hot-Encoded Werte + 15 Ablagestapel + 15 gehaltene Karte + 1 Letzte Runde Flag + 1 Phase Flag
 HIDDEN_SIZE_1 = 128
 HIDDEN_SIZE_2 = 64
@@ -27,11 +28,11 @@ MUTATION_NOISE = 0.02  # Stärke des Rauschens, das
 ILLEGAL_CHOICE_PENALTY = 10  # Strafpunkte für illegale Entscheidungen
 FINISHER_BONUS = 100  # Bonus für den Spieler, der das Spiel gewinnt
 CARDS_OPENED_BONUS = 20  # Bonus pro geöffneter Karte, um das Öffnen von Karten zu fördern
-TIMEOUT_PENALTY = 300  # Strafpunkte für Spiele, die nicht regulär beendet wurden (z.B. durch Zeitüberschreitung)
+TIMEOUT_PENALTY = 800  # Strafpunkte für Spiele, die nicht regulär beendet wurden (z.B. durch Zeitüberschreitung)
 # EPSILON DECAY PARAMETER
 EPSILON_START = 1.0  # Anfangswert von Epsilon für die Epsilon-Greedy-Strategie
 EPSILON_DECAY = 0.96  # Faktor, um den Epsilon nach jeder Generation zu multiplizieren
-EPSILON_MIN = 0.05
+EPSILON_MIN = 0.1
 
 def card_to_one_hot(card, mask):
     """ Wandelt eine Karte in ein One-Hot-Encoded Array um mit 17 Elementen:
@@ -119,7 +120,7 @@ def play_game(players: list[SkyjoBrain_TwoHidden], env: SkyjoGame, epsilon=0.1):
     # Zufälligen Spieler auswählen, der beginnt
     start_player = np.random.randint(0, len(players))
     env.current_player = start_player
-    while not done and turns < 200:  # Sicherheitsabfrage, um endlose Spiele zu vermeiden
+    while not done and turns < 80:  # Sicherheitsabfrage, um endlose Spiele zu vermeiden
         current_player = env.current_player
         brain = players[current_player]
         raw_state = env.get_state()
@@ -145,7 +146,7 @@ def evaluate_fitness(population: list[SkyjoBrain_TwoHidden], scores, illegal_cho
     fitness_scores = np.zeros(len(population))
     if scores is None:
             fitness_scores = fitness_scores - TIMEOUT_PENALTY - (illegal_choices * ILLEGAL_CHOICE_PENALTY)  # Strafpunkte für illegale Entscheidungen, aber keine Belohnung für das Spiel, da es nicht regulär beendet wurde
-            fitness_scores += np.array(cards_opened) * CARDS_OPENED_BONUS  # Bonus für geöffnete Karten, um das Öffnen von Karten zu fördern, auch wenn das Spiel nicht regulär beendet wurde
+            fitness_scores += np.array(cards_opened) ** CARDS_OPENED_BONUS  # Bonus für geöffnete Karten, um das Öffnen von Karten zu fördern, auch wenn das Spiel nicht regulär beendet wurde
     else:
         for i in range(len(population)):
             own_score = scores[i]
@@ -155,18 +156,35 @@ def evaluate_fitness(population: list[SkyjoBrain_TwoHidden], scores, illegal_cho
             fitness = 100 - own_score + np.mean(opponents_scores)
             # Auswahl illealer Entscheidungen in die Fitness einbeziehen
             fitness -= illegal_choices[i] * ILLEGAL_CHOICE_PENALTY  # Strafpunkte für illegale Entscheidungen
+            fitness += cards_opened[i] ** CARDS_OPENED_BONUS  # Bonus für geöffnete Karten, um das Öffnen von Karten zu fördern
+
             # Siegerbonus hinzufügen, um das Gewinnen zu belohnen
             if finisher_id == i:
                 fitness += FINISHER_BONUS  # Bonus für den Sieger
             fitness_scores[i] = fitness
     return fitness_scores
     
-def evaluate_population(population: list[SkyjoBrain_TwoHidden], epsilon=0.1):
+def evaluate_population(population: list[SkyjoBrain_TwoHidden], parents: list[SkyjoBrain_TwoHidden], epsilon=0.1):
     
     total_fitness = np.zeros(POPULATION_SIZE)
     games_played = np.zeros(POPULATION_SIZE)
     env = SkyjoGame()
     games_not_finfished = 0
+
+    if parents is not None:
+        for _ in range(GAMES_PER_MODEL_PER_GEN_AGAINST_PARENTS):
+            for i in range(POPULATION_SIZE):
+                # Jeder Brain spielt gegen 2 zufällige Gegner aus den Eltern
+                opponents = np.random.choice(len(parents), size=2, replace=False)
+                players = [population[i]] + [parents[j] for j in opponents]
+                # Spiel spielen
+                raw_scores, illegal_choices, finisher_id, cards_opened = play_game(players, env, epsilon)
+                if raw_scores is None:
+                    games_not_finfished += 1
+                # Fitness bewerten
+                fitness_scores = evaluate_fitness(players, raw_scores, illegal_choices, finisher_id, cards_opened)
+                total_fitness[i] += fitness_scores[0]  # Fitness des eigenen Brain hinzufügen
+                games_played[i] += 1
     
     for _ in range(GAMES_PER_MODEL_PER_GEN):
         for i in range(POPULATION_SIZE):
@@ -212,6 +230,7 @@ def run_evolution(initial_population= None, gen_start = 0):
     # Initialisierung der Population
     # Wenn eine initiale Population übergeben wird, verwenden wir diese.
     # Ansonsten erstellen wir eine neue zufällige Population
+    parents = None
     if initial_population is not  None:
         population = initial_population
     else:
@@ -245,7 +264,7 @@ def run_evolution(initial_population= None, gen_start = 0):
         # current epsilon
         epsilon = max(EPSILON_MIN, EPSILON_START * (EPSILON_DECAY ** gen))
         
-        fitness_scores, games_not_finished = evaluate_population(population, epsilon)
+        fitness_scores, games_not_finished = evaluate_population(population, parents, epsilon)
         print(f"Generation {gen}: {games_not_finished} games not finished, best fitness: {np.max(fitness_scores)}, average fitness: {np.mean(fitness_scores)}")
         tracking_dict["games_not_finished_per_gen"].append(games_not_finished)
         tracking_dict["best_fitness_per_gen"].append(np.max(fitness_scores))
@@ -257,11 +276,11 @@ def run_evolution(initial_population= None, gen_start = 0):
         # Sortieren der Fitness Scores entsprechend der Rangfolge
         fitness_scores = fitness_scores[ranked_indices]
         # neue Population erstellen
+        num_parents = int(TOP_K_SURVIVORS * POPULATION_SIZE)
+        parents = [model.copy() for model in population[:num_parents]]  # Kopieren der Top-K-Modelle als Eltern für die nächste Generation
         population = create_children(population, fitness_scores)
         # Speichern des besten Brains der aktuellen Generation
         best_brain_current_gen = population[0]
-        path = r"Brains\best_per_gen"
-        best_brain_current_gen.save(os.path.join(path, f"best_brain_gen_{gen}.npz"))
     
         # Aktualisieren des besten globalen Brains, wenn der beste Brain der aktuellen Generation besser ist als der bisherige beste globale Brain
         if best_global_brain is None or fitness_scores[0] > best_global_fitness:
